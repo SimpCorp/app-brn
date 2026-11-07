@@ -1,21 +1,35 @@
+import os
+import threading
+import requests
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QStackedWidget, QTableWidget, QTableWidgetItem, 
-    QHeaderView, QFrame, QButtonGroup
+    QHeaderView, QFrame, QButtonGroup, QFileDialog, QMessageBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal, QObject
 from core.vpn_scanner import scan_installed_vpn_clients, scan_active_network_adapters
 from core.extension_scanner import scan_browser_extensions
 from core.file_auditor import FileAuditWorker
 from gui.styles import LIGHT_THEME, DARK_THEME
 
+# Direct raw link to the PDF on your GitHub repository
+PDF_GITHUB_URL = "https://raw.githubusercontent.com/SimpCorp/app-brn/main/SecurityTool%20Usage.pdf"
+
+class DownloadSignals(QObject):
+    finished = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Brindavan Endpoint Audit")
-        self.resize(1080, 680)
+        self.resize(1120, 680)
         self.is_dark_mode = True
         self.file_worker = None
+
+        self.dl_signals = DownloadSignals()
+        self.dl_signals.finished.connect(self.on_download_success)
+        self.dl_signals.failed.connect(self.on_download_error)
 
         self.init_ui()
         self.apply_theme()
@@ -51,7 +65,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.theme_btn)
         main_layout.addWidget(header)
 
-        # Segmented Control Bar
+        # Segmented Control Bar & Actions
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(28, 0, 28, 0)
 
@@ -86,12 +100,19 @@ class MainWindow(QMainWindow):
 
         self.btn_group.idClicked.connect(self.switch_tab)
 
+        # Action Buttons
+        self.guide_btn = QPushButton("Download User Guide")
+        self.guide_btn.setObjectName("SecondaryBtn")
+        self.guide_btn.clicked.connect(self.prompt_download_guide)
+
         self.refresh_btn = QPushButton("Refresh Scan")
         self.refresh_btn.setObjectName("ActionBtn")
         self.refresh_btn.clicked.connect(self.load_audit_data)
 
         toolbar.addWidget(seg_box)
         toolbar.addStretch()
+        toolbar.addWidget(self.guide_btn)
+        toolbar.addSpacing(8)
         toolbar.addWidget(self.refresh_btn)
         main_layout.addLayout(toolbar)
 
@@ -123,7 +144,7 @@ class MainWindow(QMainWindow):
         self.ext_table.setShowGrid(False)
         self.ext_table.setAlternatingRowColors(True)
 
-        # Tab 3: Media & Large Files Table (Supports Column Sorting)
+        # Tab 3: Media & Large Files Table
         self.files_table = QTableWidget()
         self.files_table.setColumnCount(4)
         self.files_table.setHorizontalHeaderLabels(["Category", "File Name", "Size", "Full Location"])
@@ -134,7 +155,7 @@ class MainWindow(QMainWindow):
         self.files_table.verticalHeader().setVisible(False)
         self.files_table.setShowGrid(False)
         self.files_table.setAlternatingRowColors(True)
-        self.files_table.setSortingEnabled(True)  # Native table header sorting enabled
+        self.files_table.setSortingEnabled(True)
 
         self.stack.addWidget(self.vpn_table)
         self.stack.addWidget(self.ext_table)
@@ -151,6 +172,43 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self):
         self.setStyleSheet(DARK_THEME if self.is_dark_mode else LIGHT_THEME)
+
+    def prompt_download_guide(self):
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Security Tool User Guide",
+            os.path.join(os.path.expanduser("~"), "Downloads", "SecurityTool Usage.pdf"),
+            "PDF Files (*.pdf)"
+        )
+        if not save_path:
+            return
+
+        self.guide_btn.setEnabled(False)
+        self.guide_btn.setText("Downloading...")
+
+        def _download_thread():
+            try:
+                res = requests.get(PDF_GITHUB_URL, timeout=15)
+                if res.status_code == 200:
+                    with open(save_path, "wb") as f:
+                        f.write(res.content)
+                    self.dl_signals.finished.emit(save_path)
+                else:
+                    self.dl_signals.failed.emit(f"Server returned status HTTP {res.status_code}")
+            except Exception as e:
+                self.dl_signals.failed.emit(str(e))
+
+        threading.Thread(target=_download_thread, daemon=True).start()
+
+    def on_download_success(self, path):
+        self.guide_btn.setEnabled(True)
+        self.guide_btn.setText("Download User Guide")
+        QMessageBox.information(self, "Download Complete", f"User guide successfully saved to:\n{path}")
+
+    def on_download_error(self, err):
+        self.guide_btn.setEnabled(True)
+        self.guide_btn.setText("Download User Guide")
+        QMessageBox.warning(self, "Download Failed", f"Could not download the file from repository:\n{err}")
 
     def load_audit_data(self):
         # 1. Populate VPNs & Interfaces
@@ -186,7 +244,7 @@ class MainWindow(QMainWindow):
             self.ext_table.setItem(r, 4, QTableWidgetItem(ext["path"]))
 
         # 3. Start Background File Scan
-        self.files_table.setSortingEnabled(False)  # Temporarily disable sorting while populating
+        self.files_table.setSortingEnabled(False)
         self.files_table.setRowCount(0)
         
         if self.file_worker and self.file_worker.isRunning():
